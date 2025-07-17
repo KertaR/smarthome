@@ -1,32 +1,53 @@
-import React, { useState, useEffect } from 'react';
-import { useLocalStorage } from './hooks/useLocalStorage.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
 import { initialDeviceState } from './data/appData.jsx';
+import { useLocalStorage } from './hooks/useLocalStorage.jsx';
 
 // --- UI & VIEW COMPONENTS ---
-import { Sidebar } from './components/ui/Sidebar';
 import { BottomNav } from './components/ui/BottomNav';
-import { Notification } from './components/ui/Notification';
-import { ThermostatModal } from './components/ui/ThermostatModal';
 import { DashboardView } from './components/views/DashboardView';
-import { RoomsView } from './components/views/RoomsView';
+import { Notification } from './components/ui/Notification';
 import { RoomDetailView } from './components/views/RoomDetailView';
+import { RoomsView } from './components/views/RoomsView';
 import { ScenesView } from './components/views/ScenesView';
 import { SettingsView } from './components/views/SettingsView';
+import { Sidebar } from './components/ui/Sidebar';
+import { ThermostatModal } from './components/ui/ThermostatModal';
+
+// --- CONSTANTS ---
+const NOTIFICATION_TIMEOUT = 3000;
+const GARAGE_DOOR_MOVE_TIME = 3000;
+const WEATHER_UPDATE_INTERVAL = 30000;
+const MAX_LOG_ENTRIES = 5;
+
+const GARAGE_DOOR_ID = 'ajto';
+const SCENE_IDS = {
+    MORNING: 'reggel',
+    EVENING: 'este',
+    MOVIE: 'film',
+    AWAY: 'elmentem',
+};
 
 // --- MAIN APP COMPONENT ---
 export default function App() {
+    // --- STATE ---
+    // App view state
     const [view, setView] = useState('dashboard');
     const [selectedRoom, setSelectedRoom] = useState(null);
+    const [modalDevice, setModalDevice] = useState(null);
+    const [notification, setNotification] = useState({ show: false, message: '' });
+
+    // App data state (persisted)
     const [username, setUsername] = useLocalStorage('smartHomeUsername', 'Felhasználó');
     const [devices, setDevices] = useLocalStorage('smartHomeDevices', initialDeviceState);
     const [security, setSecurity] = useLocalStorage('smartHomeSecurity', { aktiv: true });
     const [theme, setTheme] = useLocalStorage('smartHomeTheme', 'dark');
     const [eventLog, setEventLog] = useLocalStorage('smartHomeLog', []);
-    const [notification, setNotification] = useState({ show: false, message: '' });
-    const [weather, setWeather] = useState({ temp: 25, condition: 'Napos' });
-    const [modalDevice, setModalDevice] = useState(null);
 
-    // Időjárás szimuláció
+    // Simulated external state
+    const [weather, setWeather] = useState({ temp: 25, condition: 'Napos' });
+
+    // --- SIDE EFFECTS ---
+    // Weather simulation
     useEffect(() => {
         const weatherConditions = ['Napos', 'Felhős', 'Esős'];
         const interval = setInterval(() => {
@@ -34,136 +55,188 @@ export default function App() {
                 temp: Math.floor(Math.random() * 15) + 15, // 15-29 C
                 condition: weatherConditions[Math.floor(Math.random() * weatherConditions.length)]
             });
-        }, 30000); // 30 másodpercenként
+        }, WEATHER_UPDATE_INTERVAL);
         return () => clearInterval(interval);
     }, []);
 
-    const addLogEntry = (message) => {
+    // --- LOGIC & HELPERS ---
+    const addLogEntry = useCallback((message) => {
         const newEntry = {
             id: Date.now(),
             time: new Date().toLocaleTimeString('hu-HU', { hour: '2-digit', minute: '2-digit' }),
             message: message,
         };
-        setEventLog(prevLog => [newEntry, ...prevLog].slice(0, 5));
-    };
+        setEventLog(prevLog => [newEntry, ...prevLog].slice(0, MAX_LOG_ENTRIES));
+    }, [setEventLog]);
 
-    const showNotification = (message) => {
+    const showNotification = useCallback((message) => {
         setNotification({ show: true, message });
-        setTimeout(() => setNotification({ show: false, message: '' }), 3000);
-    };
+        setTimeout(() => setNotification({ show: false, message: '' }), NOTIFICATION_TIMEOUT);
+    }, []); // setNotification is stable
 
-    const handleDeviceChange = (roomId, deviceId, newState) => {
-        // Speciális logika a garázsajtóhoz
-        if (deviceId === 'ajto') {
-            const currentState = devices[roomId].devices[deviceId];
-            if (currentState.isMoving) return;
+    // --- EVENT HANDLERS ---
+    const handleDeviceChange = useCallback((roomId, deviceId, newState) => {
+        // Special logic for the garage door
+        if (deviceId === GARAGE_DOOR_ID) {
+            setDevices(prevDevices => {
+                const currentState = prevDevices[roomId].devices[deviceId];
+                if (currentState.isMoving) return prevDevices;
 
-            const isOpening = currentState.status === 'Zárva';
-            const startStatus = isOpening ? 'Nyitás...' : 'Zárás...';
-            const endStatus = isOpening ? 'Nyitva' : 'Zárva';
-            
-            addLogEntry(`Garázsajtó: ${startStatus}`);
-            setDevices(prev => ({ ...prev, [roomId]: { ...prev[roomId], devices: { ...prev[roomId].devices, [deviceId]: { ...currentState, favorite: currentState.favorite, status: startStatus, isMoving: true } } } }));
+                const isOpening = currentState.status === 'Zárva';
+                const startStatus = isOpening ? 'Nyitás...' : 'Zárás...';
+                const endStatus = isOpening ? 'Nyitva' : 'Zárva';
 
-            setTimeout(() => {
-                addLogEntry(`Garázsajtó: ${endStatus}`);
-                setDevices(prev => {
-                    const latestState = { ...prev };
-                    latestState[roomId].devices[deviceId].status = endStatus;
-                    latestState[roomId].devices[deviceId].isMoving = false;
-                    return latestState;
-                });
-            }, 3000);
+                addLogEntry(`Garázsajtó: ${startStatus}`);
 
+                setTimeout(() => {
+                    addLogEntry(`Garázsajtó: ${endStatus}`);
+                    setDevices(currentDevices => {
+                        const updatedDevice = { ...currentDevices[roomId].devices[deviceId], status: endStatus, isMoving: false };
+                        return {
+                           ...currentDevices,
+                            [roomId]: {
+                                ...currentDevices[roomId],
+                                devices: { ...currentDevices[roomId].devices, [deviceId]: updatedDevice }
+                            }
+                        };
+                    });
+                }, GARAGE_DOOR_MOVE_TIME);
+
+                const movingDeviceState = { ...currentState, status: startStatus, isMoving: true };
+                return {
+                    ...prevDevices,
+                    [roomId]: {
+                        ...prevDevices[roomId],
+                        devices: { ...prevDevices[roomId].devices, [deviceId]: movingDeviceState }
+                    }
+                };
+            });
         } else {
-            setDevices(prev => ({ ...prev, [roomId]: { ...prev[roomId], devices: { ...prev[roomId].devices, [deviceId]: newState }}}));
+            setDevices(prev => ({
+                ...prev,
+                [roomId]: {
+                    ...prev[roomId],
+                    devices: { ...prev[roomId].devices, [deviceId]: newState }
+                }
+            }));
         }
-    };
+    }, [addLogEntry, setDevices]);
 
-    const handleRoomDeviceChange = (deviceId, newState) => {
+    const handleRoomDeviceChange = useCallback((deviceId, newState) => {
         if (!selectedRoom) return;
         handleDeviceChange(selectedRoom, deviceId, newState);
-    };
+    }, [selectedRoom, handleDeviceChange]);
 
-    const handleFavoriteToggle = (roomId, deviceId, deviceData) => {
+    const handleFavoriteToggle = useCallback((roomId, deviceId, deviceData) => {
         const newFavoriteState = !deviceData.favorite;
         handleDeviceChange(roomId, deviceId, { ...deviceData, favorite: newFavoriteState });
-    };
+    }, [handleDeviceChange]);
     
-    const handleActivateScene = (sceneId, sceneName) => {
-        const newDevices = JSON.parse(JSON.stringify(devices));
-        if (sceneId === 'reggel') {
-            newDevices.nappali.devices.vilagitas.on = true;
-            newDevices.nappali.devices.redony.open = 100;
-            newDevices.konyha.devices.kavefozo.on = true;
-        } else if (sceneId === 'este') {
-            Object.keys(newDevices).forEach(roomId => {
-                Object.values(newDevices[roomId].devices).forEach(device => {
-                    if (device.type === 'light') {
-                        device.on = false;
-                    }
-                    if (device.type === 'blinds') {
-                        device.open = 0;
-                    }
+    const handleActivateScene = useCallback((sceneId, sceneName) => {
+        // Use structuredClone for a safe deep copy of the devices state
+        const newDevices = structuredClone(devices);
+        
+        switch (sceneId) {
+            case SCENE_IDS.MORNING:
+                newDevices.nappali.devices.vilagitas.on = true;
+                newDevices.nappali.devices.redony.open = 100;
+                newDevices.konyha.devices.kavefozo.on = true;
+                break;
+            case SCENE_IDS.EVENING:
+                Object.keys(newDevices).forEach(roomId => {
+                    Object.values(newDevices[roomId].devices).forEach(device => {
+                        if (device.type === 'light') device.on = false;
+                        if (device.type === 'blinds') device.open = 0;
+                    });
                 });
-            });
-            newDevices.haloszoba.devices.vilagitas.on = true;
-            newDevices.haloszoba.devices.vilagitas.brightness = 10;
-        } else if (sceneId === 'film') {
-             newDevices.nappali.devices.vilagitas.on = true;
-             newDevices.nappali.devices.vilagitas.brightness = 20;
-             newDevices.nappali.devices.redony.open = 0;
-             newDevices.nappali.devices.zenelejatszo.on = true;
-             newDevices.nappali.devices.zenelejatszo.trackIndex = 2; // Ambient Focus
-        } else if (sceneId === 'elmentem') {
-             Object.keys(newDevices).forEach(roomId => {
-                Object.values(newDevices[roomId].devices).forEach(device => {
-                    if (typeof device.on !== 'undefined') {
-                        device.on = false;
-                    }
+                newDevices.haloszoba.devices.vilagitas.on = true;
+                newDevices.haloszoba.devices.vilagitas.brightness = 10;
+                break;
+            case SCENE_IDS.MOVIE:
+                 newDevices.nappali.devices.vilagitas.on = true;
+                 newDevices.nappali.devices.vilagitas.brightness = 20;
+                 newDevices.nappali.devices.redony.open = 0;
+                 newDevices.nappali.devices.zenelejatszo.on = true;
+                 newDevices.nappali.devices.zenelejatszo.trackIndex = 2; // Ambient Focus
+                break;
+            case SCENE_IDS.AWAY:
+                 Object.keys(newDevices).forEach(roomId => {
+                    Object.values(newDevices[roomId].devices).forEach(device => {
+                        if (typeof device.on !== 'undefined') device.on = false;
+                    });
                 });
-            });
-            setSecurity({ aktiv: true });
-            addLogEntry("Biztonsági rendszer élesítve.");
+                setSecurity({ aktiv: true });
+                addLogEntry("Biztonsági rendszer élesítve.");
+                break;
+            default:
+                console.warn(`Unknown scene activated: ${sceneId}`);
         }
+        
         setDevices(newDevices);
         addLogEntry(`Jelenet aktiválva: ${sceneName}`);
         showNotification(`${sceneName} jelenet aktiválva.`);
         setView('dashboard');
-    };
+    }, [devices, setDevices, addLogEntry, showNotification, setView, setSecurity]);
 
-    const handleSecurityToggle = () => {
-        const newState = !security.aktiv;
-        setSecurity({ aktiv: newState });
-        const message = newState ? "Biztonsági rendszer élesítve." : "Biztonsági rendszer kikapcsolva.";
-        addLogEntry(message);
-        showNotification(message);
-    };
+    const handleSecurityToggle = useCallback(() => {
+        setSecurity(prevSecurity => {
+            const newState = !prevSecurity.aktiv;
+            const message = newState ? "Biztonsági rendszer élesítve." : "Biztonsági rendszer kikapcsolva.";
+            addLogEntry(message);
+            showNotification(message);
+            return { aktiv: newState };
+        });
+    }, [setSecurity, addLogEntry, showNotification]);
 
-    const handleOpenModal = (device) => {
-        setModalDevice(device);
-    };
+    const handleOpenModal = useCallback((device) => setModalDevice(device), []);
+    const handleCloseModal = useCallback(() => setModalDevice(null), []);
 
-    const handleCloseModal = () => {
-        setModalDevice(null);
-    };
-
-    const handleModalDeviceChange = (newState) => {
+    const handleModalDeviceChange = useCallback((newState) => {
         const { roomId, id } = newState;
         handleDeviceChange(roomId, id, newState);
         setModalDevice(newState);
-    };
+    }, [handleDeviceChange]);
 
+    // --- RENDER LOGIC ---
     const renderContent = () => {
         if (selectedRoom) {
-            return <RoomDetailView room={devices[selectedRoom]} roomId={selectedRoom} onBack={() => setSelectedRoom(null)} onDeviceChange={handleRoomDeviceChange} onFavoriteToggle={(deviceId, deviceData) => handleFavoriteToggle(selectedRoom, deviceId, deviceData)} onOpenModal={handleOpenModal} />;
+            return (
+                <RoomDetailView
+                    room={devices[selectedRoom]}
+                    roomId={selectedRoom}
+                    onBack={() => setSelectedRoom(null)}
+                    onDeviceChange={handleRoomDeviceChange}
+                    onFavoriteToggle={(deviceId, deviceData) => handleFavoriteToggle(selectedRoom, deviceId, deviceData)}
+                    onOpenModal={handleOpenModal}
+                />
+            );
         }
+
+        const dashboardProps = {
+            username,
+            devices,
+            security,
+            eventLog,
+            weather,
+            onSecurityToggle: handleSecurityToggle,
+            onDeviceChange: handleDeviceChange,
+            onFavoriteToggle: handleFavoriteToggle,
+            setView,
+            setSelectedRoom,
+            onOpenModal: handleOpenModal,
+        };
+
         switch (view) {
-            case 'dashboard': return <DashboardView username={username} devices={devices} security={security} onSecurityToggle={handleSecurityToggle} onDeviceChange={handleDeviceChange} onFavoriteToggle={handleFavoriteToggle} setView={setView} setSelectedRoom={setSelectedRoom} eventLog={eventLog} weather={weather} onOpenModal={handleOpenModal} />;
-            case 'rooms': return <RoomsView allDevices={devices} setSelectedRoom={setSelectedRoom} />;
-            case 'scenes': return <ScenesView onActivateScene={handleActivateScene} />;
-            case 'settings': return <SettingsView username={username} setUsername={setUsername} theme={theme} setTheme={setTheme} />;
-            default: return <DashboardView username={username} devices={devices} security={security} onSecurityToggle={handleSecurityToggle} onDeviceChange={handleDeviceChange} onFavoriteToggle={handleFavoriteToggle} setView={setView} setSelectedRoom={setSelectedRoom} eventLog={eventLog} weather={weather} onOpenModal={handleOpenModal} />;
+            case 'dashboard':
+                return <DashboardView {...dashboardProps} />;
+            case 'rooms':
+                return <RoomsView rooms={devices} setSelectedRoom={setSelectedRoom} />;
+            case 'scenes':
+                return <ScenesView onActivateScene={handleActivateScene} />;
+            case 'settings':
+                return <SettingsView username={username} setUsername={setUsername} theme={theme} setTheme={setTheme} />;
+            default:
+                return <DashboardView {...dashboardProps} />;
         }
     };
 
